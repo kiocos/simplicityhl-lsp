@@ -17,6 +17,10 @@ ropey = "1.6.1"
 miniscript = "12"
 simplicityhl = { git = "https://github.com/BlockstreamResearch/SimplicityHL.git", rev = "e68e1c6" }
 
+# WebSocket support
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
 [lints.rust]
 unsafe_code = "deny"
 unused_variables = "warn"

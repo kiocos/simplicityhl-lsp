@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse,
@@ -353,10 +353,17 @@ impl Backend {
                 self.client
                     .publish_diagnostics(
                         params.uri.clone(),
-                        vec![Diagnostic::new_simple(
-                            Range::new(start, end),
-                            err.error().to_string(),
-                        )],
+                        vec![Diagnostic {
+                            range: Range::new(start, end),
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: None,
+                            code_description: None,
+                            source: Some("simplicityhl".to_string()),
+                            message: err.error().to_string(),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        }],
                         params.version,
                     )
                     .await;
