@@ -106,16 +106,38 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn std::error::
         }
     });
 
-    // Task: LSP -> WebSocket
+    // Task: LSP -> WebSocket (with proper message framing)
     let lsp_to_ws_task = tokio::spawn(async move {
-        while let Some(data) = client_rx.recv().await {
-            // Parse LSP message (strip Content-Length header, extract JSON)
-            if let Some(json) = parse_lsp_message(&data) {
-                log::debug!("LSP -> WS: {}", json);
+        let mut buffer: Vec<u8> = Vec::new();
 
-                if let Err(e) = ws_sender.send(Message::Text(json.to_string())).await {
-                    log::error!("WebSocket send error: {}", e);
-                    break;
+        while let Some(data) = client_rx.recv().await {
+            // Accumulate data from LSP
+            buffer.extend_from_slice(&data);
+
+            // Extract and forward all complete messages
+            loop {
+                match extract_one_lsp_message(&buffer) {
+                    Ok(Some((json, consumed))) => {
+                        log::debug!("LSP -> WS: {}", json);
+
+                        if let Err(e) = ws_sender.send(Message::Text(json)).await {
+                            log::error!("WebSocket send error: {}", e);
+                            return;
+                        }
+
+                        // Remove the consumed bytes and continue parsing
+                        buffer.drain(0..consumed);
+                    }
+                    Ok(None) => {
+                        // Need more data
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to parse LSP message from buffer: {}", e);
+                        // In case of parse error, drop buffer to resync
+                        buffer.clear();
+                        break;
+                    }
                 }
             }
         }
@@ -131,15 +153,46 @@ async fn handle_connection(stream: TcpStream) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Parses an LSP message by stripping the Content-Length header
-fn parse_lsp_message(data: &[u8]) -> Option<&str> {
-    let text = std::str::from_utf8(data).ok()?;
+/// Extract exactly one LSP message from the front of `buf` if complete.
+/// Returns Ok(Some((json, consumed_bytes))) when a full message is available,
+/// Ok(None) when more data is needed, or Err on malformed data.
+fn extract_one_lsp_message(buf: &[u8]) -> Result<Option<(String, usize)>, String> {
+    // Find header terminator
+    let text = std::str::from_utf8(buf).map_err(|e| e.to_string())?;
+    let header_end = match text.find("\r\n\r\n") {
+        Some(i) => i,
+        None => return Ok(None), // need more data
+    };
 
-    // Find the end of headers (\r\n\r\n)
-    let header_end = text.find("\r\n\r\n")?;
-    let json_body = &text[header_end + 4..];
+    // Parse headers slice
+    let headers = &text[..header_end];
 
-    Some(json_body)
+    // Find and parse Content-Length
+    let mut content_length: Option<usize> = None;
+    for line in headers.split("\r\n") {
+        // Trim and check case-insensitively for robustness
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            let value = rest.trim();
+            content_length = Some(value.parse::<usize>().map_err(|e| e.to_string())?);
+            break;
+        }
+    }
+
+    let content_length = content_length.ok_or_else(|| "Missing Content-Length header".to_string())?;
+
+    let body_start = header_end + 4; // skip CRLFCRLF
+    let needed = body_start + content_length;
+    if buf.len() < needed {
+        return Ok(None); // body incomplete
+    }
+
+    let body_bytes = &buf[body_start..needed];
+    let json = std::str::from_utf8(body_bytes)
+        .map_err(|e| format!("Invalid UTF-8 body: {}", e))?
+        .to_string();
+
+    Ok(Some((json, needed)))
 }
 
 // Channel-based async I/O adapters
